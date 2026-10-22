@@ -18,6 +18,7 @@
 
 use hya_net::{header_lookup, Connector, MaybeTls, Proxy, Target, TlsCapableConnector};
 use std::io;
+use std::sync::RwLock;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -124,22 +125,42 @@ impl Url {
     }
 }
 
-/// The proxy the environment names for `url`, if any.
-///
-/// `HTTPS_PROXY`/`https_proxy` for TLS targets and `HTTP_PROXY`/`http_proxy`
-/// for plain ones, the way curl reads them. Loopback targets are never
-/// proxied: the mock server the tests run against lives there, and no proxy
-/// can reach it anyway. A value that does not parse is ignored rather than
-/// fatal — the updater has no logger, and a broken proxy setting should not
-/// turn an update check into an error nobody can trace.
-pub fn proxy_from_env(url: &str) -> Option<Proxy> {
-    let u = Url::parse(url).ok()?;
-    proxy_for(&u, |name| std::env::var(name).ok())
+static CONFIGURED: RwLock<Option<Proxy>> = RwLock::new(None);
+
+/// Route every later request through `proxy`, ahead of the environment.
+/// The GUI hands over the proxy from its Connection settings; `None` goes
+/// back to reading `HTTP(S)_PROXY`.
+pub fn set_proxy(proxy: Option<Proxy>) {
+    if let Ok(mut g) = CONFIGURED.write() {
+        *g = proxy;
+    }
 }
 
-fn proxy_for(url: &Url, env: impl Fn(&str) -> Option<String>) -> Option<Proxy> {
+/// The proxy `url` goes through: the one set with [`set_proxy`], else the one
+/// the environment names.
+///
+/// The environment is read the way curl does: `HTTPS_PROXY`/`https_proxy` for
+/// TLS targets and `HTTP_PROXY`/`http_proxy` for plain ones. Loopback targets
+/// are never proxied: the mock server the tests run against lives there, and
+/// no proxy can reach it anyway. A value that does not parse is ignored rather
+/// than fatal — the updater has no logger, and a broken proxy setting should
+/// not turn an update check into an error nobody can trace.
+pub fn proxy_for_url(url: &str) -> Option<Proxy> {
+    let u = Url::parse(url).ok()?;
+    let configured = CONFIGURED.read().ok().and_then(|g| g.clone());
+    proxy_for(&u, configured, |name| std::env::var(name).ok())
+}
+
+fn proxy_for(
+    url: &Url,
+    configured: Option<Proxy>,
+    env: impl Fn(&str) -> Option<String>,
+) -> Option<Proxy> {
     if url.is_loopback() {
         return None;
+    }
+    if configured.is_some() {
+        return configured;
     }
     let names: &[&str] = if url.tls {
         &["HTTPS_PROXY", "https_proxy"]
@@ -344,7 +365,7 @@ fn hhmm_utc(epoch: u64) -> String {
 
 /// GET a small object whole. The cap is a refusal, not a truncation.
 pub async fn get_bytes(url: &str, user_agent: &str, cap: usize) -> io::Result<Vec<u8>> {
-    let proxy = proxy_from_env(url);
+    let proxy = proxy_for_url(url);
     fetch_bytes(
         url,
         user_agent,
@@ -359,7 +380,7 @@ pub async fn get_bytes(url: &str, user_agent: &str, cap: usize) -> io::Result<Ve
 /// GET a GitHub REST resource whole, with the API's own headers and its
 /// refusals spelled out ([`describe_failure`]).
 pub async fn get_json(url: &str, user_agent: &str, cap: usize) -> io::Result<Vec<u8>> {
-    let proxy = proxy_from_env(url);
+    let proxy = proxy_for_url(url);
     fetch_bytes(
         url,
         user_agent,
@@ -418,7 +439,7 @@ pub async fn download_to_file(
     dest: &std::path::Path,
     progress: impl FnMut(u64, Option<u64>) -> bool + Send,
 ) -> io::Result<()> {
-    let proxy = proxy_from_env(url);
+    let proxy = proxy_for_url(url);
     download_with(
         url,
         user_agent,
@@ -722,10 +743,10 @@ mod tests {
             "http_proxy" => Some("socks5://127.0.0.1:1080".to_string()),
             _ => None,
         };
-        let https = proxy_for(&Url::parse("https://api.github.com/x").unwrap(), env).unwrap();
+        let https = proxy_for(&Url::parse("https://api.github.com/x").unwrap(), None, env).unwrap();
         assert_eq!((https.host.as_str(), https.port), ("proxy.corp", 3128));
         assert!(!https.kind.is_socks());
-        let http = proxy_for(&Url::parse("http://mirror.example/x").unwrap(), env).unwrap();
+        let http = proxy_for(&Url::parse("http://mirror.example/x").unwrap(), None, env).unwrap();
         assert!(http.kind.is_socks());
         // The mock server lives on loopback, and no proxy could reach it.
         for local in [
@@ -734,18 +755,49 @@ mod tests {
             "http://[::1]:1/x",
         ] {
             assert!(
-                proxy_for(&Url::parse(local).unwrap(), env).is_none(),
+                proxy_for(&Url::parse(local).unwrap(), None, env).is_none(),
                 "{local}"
             );
         }
         // Garbage in the variable is no proxy, not an error.
-        assert!(
-            proxy_for(&Url::parse("https://api.github.com/x").unwrap(), |_| Some(
-                "ftp://nope".into()
-            ))
-            .is_none()
-        );
-        assert!(proxy_for(&Url::parse("https://api.github.com/x").unwrap(), |_| None).is_none());
+        assert!(proxy_for(
+            &Url::parse("https://api.github.com/x").unwrap(),
+            None,
+            |_| Some("ftp://nope".into())
+        )
+        .is_none());
+        assert!(proxy_for(
+            &Url::parse("https://api.github.com/x").unwrap(),
+            None,
+            |_| None
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn a_configured_proxy_beats_the_environment_but_not_loopback() {
+        let configured = Proxy::parse("socks5://127.0.0.1:10808").unwrap();
+        let env = |_: &str| Some("http://env.proxy:3128".to_string());
+        let got = proxy_for(
+            &Url::parse("https://api.github.com/x").unwrap(),
+            Some(configured.clone()),
+            env,
+        )
+        .unwrap();
+        assert_eq!(got, configured);
+        let plain = proxy_for(
+            &Url::parse("http://mirror.example/x").unwrap(),
+            Some(configured.clone()),
+            env,
+        )
+        .unwrap();
+        assert_eq!(plain, configured);
+        assert!(proxy_for(
+            &Url::parse("http://127.0.0.1:8642/x").unwrap(),
+            Some(configured),
+            env
+        )
+        .is_none());
     }
 
     /// Serve one canned response to every connection; hand back the request

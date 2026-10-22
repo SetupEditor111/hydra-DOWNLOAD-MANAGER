@@ -66,6 +66,17 @@ fn user_agent() -> String {
     format!("hydra-gui/{}", env!("CARGO_PKG_VERSION"))
 }
 
+fn running_portable() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(hya_updater::is_portable_install))
+        .unwrap_or(false)
+}
+
+fn use_connection_proxy() {
+    hya_updater::http::set_proxy(crate::proxy::active().plugin_proxy());
+}
+
 /// Ask the release API whether a newer GUI bundle exists for this machine.
 /// `beta` (Options > General > "Download Beta channel") also considers `-rc`
 /// pre-releases when one is ahead of the stable release.
@@ -74,6 +85,7 @@ fn user_agent() -> String {
 /// OS/arch comes back with `has_bundle == false`: the version is still news,
 /// even when the dialog can only point at the release page.
 pub async fn check(beta: bool) -> Result<Option<UpdateInfo>, String> {
+    use_connection_proxy();
     let rel = hya_updater::check_channel(&user_agent(), beta)
         .await
         .map_err(|e| e.to_string())?;
@@ -86,6 +98,7 @@ pub async fn check(beta: bool) -> Result<Option<UpdateInfo>, String> {
     let appimage = hya_updater::appimage_path();
     let asset = match &appimage {
         Some(_) => rel.appimage_asset(),
+        None if running_portable() => rel.portable_asset(),
         None => rel.gui_asset(),
     };
     let Some(asset) = asset else {
@@ -227,6 +240,7 @@ async fn drive(
     tx: &mut iced::futures::channel::mpsc::Sender<UpdateEvent>,
 ) -> std::io::Result<()> {
     use iced::futures::SinkExt;
+    use_connection_proxy();
     let ua = user_agent();
     let stage = hya_updater::staging_dir();
     let archive = stage.join(&info.asset_name);
@@ -263,7 +277,12 @@ async fn drive(
         None => {
             let unpack = stage.join("unpacked");
             let _ = std::fs::remove_dir_all(&unpack);
-            Some(hya_updater::extract(&archive, &unpack)?)
+            let root = hya_updater::extract(&archive, &unpack)?;
+            Some(if running_portable() {
+                root.join(hya_updater::PORTABLE_APP_DIR)
+            } else {
+                root
+            })
         }
     };
 
