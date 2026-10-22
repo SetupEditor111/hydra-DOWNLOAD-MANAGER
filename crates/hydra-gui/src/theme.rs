@@ -350,6 +350,31 @@ pub fn row_cell(selected: bool, hovered: bool) -> impl Fn(&Theme) -> container::
     }
 }
 
+/// The fill drawn behind a Status cell up to the download's percentage,
+/// tinted by state and translucent so the text stays readable.
+pub fn progress_fill(state: crate::model::DlState) -> impl Fn(&Theme) -> container::Style {
+    use crate::model::DlState;
+    move |theme| {
+        let dark = is_dark(theme);
+        let tint = match (state, dark) {
+            (DlState::Complete, false) => 0x2E9E4F,
+            (DlState::Complete, true) => 0x3DBA62,
+            (DlState::Error, false) => 0xD94B4B,
+            (DlState::Error, true) => 0xE8625F,
+            (DlState::Paused, false) => 0xE0A020,
+            (DlState::Paused, true) => 0xF0B840,
+            (DlState::Queued, false) => 0x8A8F98,
+            (DlState::Queued, true) => 0x9AA0AA,
+            (_, false) => 0x3399FF,
+            (_, true) => 0x4A9EFF,
+        };
+        container::Style {
+            background: Some(Background::Color(Color { a: 0.35, ..c(tint) })),
+            ..Default::default()
+        }
+    }
+}
+
 /// The rubber-band rectangle a drag-selection paints over the list:
 /// translucent selection fill inside a solid 1 px edge, like a listview
 /// marquee.

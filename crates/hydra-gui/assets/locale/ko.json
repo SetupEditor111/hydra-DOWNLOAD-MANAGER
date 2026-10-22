@@ -628,5 +628,7 @@
   "First": "맨 앞",
   "Last": "맨 뒤",
   "Toolbar buttons shown: {shown} of {max}": "표시된 도구 모음 버튼: {shown} / {max}",
-  "Choose a folder": "Choose a folder"
+  "Choose a folder": "Choose a folder",
+  "Show progress bar in the Status column": "Show progress bar in the Status column",
+  "Fills each download's Status cell up to its percentage, tinted by state.": "Fills each download's Status cell up to its percentage, tinted by state."
 }

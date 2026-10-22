@@ -628,5 +628,7 @@
   "First": "แรกสุด",
   "Last": "ท้ายสุด",
   "Toolbar buttons shown: {shown} of {max}": "ปุ่มแถบเครื่องมือที่แสดง: {shown} จาก {max}",
-  "Choose a folder": "Choose a folder"
+  "Choose a folder": "Choose a folder",
+  "Show progress bar in the Status column": "Show progress bar in the Status column",
+  "Fills each download's Status cell up to its percentage, tinted by state.": "Fills each download's Status cell up to its percentage, tinted by state."
 }

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! The download list: File Name | Q | Size | Status | Time left |
-//! Transfer rate | Last Try Date | Description, with a flat listview-style
+//! Transfer rate | Last Try Date | Description | Downloaded (hidden by default), with a flat listview-style
 //! header, sortable columns and a horizontal scrollbar. Q is the
 //! icon-only queue-membership strip.
 //!
@@ -118,6 +118,15 @@ fn cell<'a>(content: El<'a>, w: f32) -> El<'a> {
         .padding([2, 6])
         .clip(true)
         .into()
+}
+
+/// The fill behind a Status cell, `fraction` of its width.
+fn progress_bar<'a>(d: &DownloadItem, fraction: f32, w: f32) -> El<'a> {
+    let filled = container(iced::widget::space::horizontal())
+        .width(w * fraction)
+        .height(CELL_H)
+        .style(theme::progress_fill(d.state));
+    container(filled).width(w).height(CELL_H).into()
 }
 
 /// The divider strip between columns: full drag-handle width, drawing one
@@ -273,6 +282,7 @@ fn cell_content<'a>(app: &App, d: &'a DownloadItem, col: Column) -> El<'a> {
         Column::Queue => queue_glyph(app, d),
         Column::Size => txt(d.size.map(fmt::size2).unwrap_or_default()),
         Column::Status => txt(d.status_text()),
+        Column::Downloaded => txt(d.downloaded_text()),
         Column::TimeLeft => txt(match d.state {
             crate::model::DlState::Receiving => d.eta_secs.map(fmt::eta).unwrap_or_default(),
             _ => String::new(),
@@ -300,7 +310,14 @@ fn data_row<'a>(
 ) -> El<'a> {
     let mut content = row![].spacing(0);
     for (col, w) in c {
-        content = content.push(cell(cell_content(app, d, *col), *w));
+        let body = cell(cell_content(app, d, *col), *w);
+        let progress = d.progress();
+        let bar = *col == Column::Status && app.cfg.settings.show_progress_bar && progress > 0.0;
+        content = content.push(if bar {
+            stack![progress_bar(d, progress, *w), body].into()
+        } else {
+            body
+        });
         content = content.push(rule_grip());
     }
 
