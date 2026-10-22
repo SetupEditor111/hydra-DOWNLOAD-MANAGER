@@ -111,6 +111,12 @@ impl Release {
         self.asset_for(gui_asset_name)
     }
 
+    /// The Windows portable bundle for this machine, `None` when the release
+    /// ships none.
+    pub fn portable_asset(&self) -> Option<&ReleaseAsset> {
+        self.asset_for(portable_asset_name)
+    }
+
     /// The standalone CLI archive for this machine.
     pub fn cli_asset(&self) -> Option<&ReleaseAsset> {
         self.asset_for(cli_asset_name)
@@ -437,6 +443,30 @@ pub fn in_app_bundle(dir: &Path) -> bool {
     app_bundle_root(dir).is_some()
 }
 
+/// The directory a Windows portable bundle keeps its program files in,
+/// relative to the `HydraPortable` root.
+pub const PORTABLE_APP_DIR: &str = "App/Hydra";
+
+/// Whether `dir` (the directory holding the running executable) is a
+/// PortableApps-style bundle: `HydraPortable\App\Hydra` beside the
+/// `HydraPortable.exe` launcher. Its release asset is the portable zip, whose
+/// program files sit under [`PORTABLE_APP_DIR`] rather than at the archive
+/// root.
+pub fn is_portable_install(dir: &Path) -> bool {
+    let is_named = |p: &Path, name: &str| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.eq_ignore_ascii_case(name))
+    };
+    let Some(app) = dir.parent().filter(|_| is_named(dir, "Hydra")) else {
+        return false;
+    };
+    let Some(root) = app.parent().filter(|_| is_named(app, "App")) else {
+        return false;
+    };
+    root.join("HydraPortable.exe").is_file()
+}
+
 /// The directory holding a bundle's executables.
 pub fn bundle_bin_dir(bundle: &Path) -> PathBuf {
     bundle.join("Contents").join("MacOS")
@@ -715,6 +745,12 @@ pub fn gui_asset_name(version: &str) -> String {
         arch_tag(),
         archive_ext()
     )
+}
+
+/// Release asset holding the Windows portable bundle for this machine:
+/// `hydra-0.2.4-windows-portable-amd64.zip`.
+pub fn portable_asset_name(version: &str) -> String {
+    format!("hydra-{version}-windows-portable-{}.zip", arch_tag())
 }
 
 /// Release asset holding the standalone CLI for this machine:
@@ -1616,6 +1652,49 @@ mod tests {
             assert!(n.contains(os_tag()) && n.contains(arch_tag()));
             assert!(n.ends_with(archive_ext()));
         }
+    }
+
+    #[test]
+    fn the_portable_asset_is_not_the_regular_bundle() {
+        let mut r = rel("v1.1.6", false);
+        for name in [gui_asset_name("1.1.6"), portable_asset_name("1.1.6")] {
+            r.assets.push(ReleaseAsset {
+                name,
+                browser_download_url: String::new(),
+                size: 0,
+            });
+        }
+        assert_eq!(
+            portable_asset_name("1.1.6"),
+            format!("hydra-1.1.6-windows-portable-{}.zip", arch_tag())
+        );
+        assert_eq!(
+            r.portable_asset().map(|a| a.name.as_str()),
+            Some(portable_asset_name("1.1.6").as_str())
+        );
+        assert_ne!(
+            r.portable_asset().map(|a| &a.name),
+            r.gui_asset().map(|a| &a.name)
+        );
+        assert!(rel("v1.1.6", false).portable_asset().is_none());
+    }
+
+    #[test]
+    fn a_portable_install_is_hydra_under_app_beside_the_launcher() {
+        let root = std::env::temp_dir().join(format!("hydra-portable-{}", std::process::id()));
+        let app = root.join("HydraPortable").join("App").join("Hydra");
+        std::fs::create_dir_all(&app).unwrap();
+
+        assert!(!is_portable_install(&app), "no launcher yet");
+        std::fs::write(root.join("HydraPortable").join("HydraPortable.exe"), b"").unwrap();
+        assert!(is_portable_install(&app));
+
+        let elsewhere = root.join("HydraPortable").join("App").join("Other");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        assert!(!is_portable_install(&elsewhere));
+        assert!(!is_portable_install(&root.join("HydraPortable")));
+        assert!(!is_portable_install(Path::new("/")));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

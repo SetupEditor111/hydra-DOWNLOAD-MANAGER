@@ -23,17 +23,17 @@ esac
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 
 if [ "$NO_BUILD" = 0 ]; then
-  echo "building hydra-gui + hydra-host + hydra (cli) for $TARGET..."
+  echo "building hydra-gui + hydra-host + hydra (cli) + hydra-updater for $TARGET..."
   # cargo-xwin puts its sysroot -L in CFLAGS, which clang flags as unused when
   # embed-resource runs it as the .rc preprocessor.
   PATH="/opt/homebrew/opt/llvm/bin:$PATH" \
     TARGET_CFLAGS="-Wno-unused-command-line-argument" \
     cargo xwin build --release --target "$TARGET" --cross-compiler clang \
-      -p hya-gui -p hya-host -p hya-cli
+      -p hya-gui -p hya-host -p hya-cli -p hya-updater
 fi
 
 BUILD="target/$TARGET/release"
-for bin in hydra-gui.exe hydra-host.exe hydra.exe; do
+for bin in hydra-gui.exe hydra-host.exe hydra.exe hydra-updater.exe; do
   [ -f "$BUILD/$bin" ] || {
     echo "missing $BUILD/$bin (build failed or --no-build without a prior build?)" >&2
     exit 1
@@ -70,8 +70,9 @@ INI
 
 # The application itself, file for file as hydra-installer.nsi installs it:
 # the GUI, the CLI under both of its names, the native-messaging host, the
-# icon the shortcut uses and the licence.
-cp "$BUILD/hydra-gui.exe" "$BUILD/hydra.exe" "$BUILD/hydra-host.exe" "$APP/"
+# self-update finisher, the icon the shortcut uses and the licence.
+cp "$BUILD/hydra-gui.exe" "$BUILD/hydra.exe" "$BUILD/hydra-host.exe" \
+  "$BUILD/hydra-updater.exe" "$APP/"
 cp "$BUILD/hydra.exe" "$APP/hya.exe"
 cp scripts/windows/hydra.ico "$APP/"
 cp LICENSE "$APP/"
