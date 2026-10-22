@@ -628,5 +628,7 @@
   "First": "Erste",
   "Last": "Letzte",
   "Toolbar buttons shown: {shown} of {max}": "Angezeigte Symbolleistenschaltflächen: {shown} von {max}",
-  "Choose a folder": "Choose a folder"
+  "Choose a folder": "Choose a folder",
+  "Show progress bar in the Status column": "Show progress bar in the Status column",
+  "Fills each download's Status cell up to its percentage, tinted by state.": "Fills each download's Status cell up to its percentage, tinted by state."
 }

@@ -628,5 +628,7 @@
   "First": "Primul",
   "Last": "Ultimul",
   "Toolbar buttons shown: {shown} of {max}": "Butoane afișate în bara de instrumente: {shown} din {max}",
-  "Choose a folder": "Choose a folder"
+  "Choose a folder": "Choose a folder",
+  "Show progress bar in the Status column": "Show progress bar in the Status column",
+  "Fills each download's Status cell up to its percentage, tinted by state.": "Fills each download's Status cell up to its percentage, tinted by state."
 }

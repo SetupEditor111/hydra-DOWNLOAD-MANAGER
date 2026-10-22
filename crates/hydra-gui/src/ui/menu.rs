@@ -832,7 +832,7 @@ mod tests {
         };
         let entries = arrange_entries(&app);
 
-        assert_eq!(entries.len(), 10);
+        assert_eq!(entries.len(), 11);
         let add_entry = entries
             .iter()
             .find(|e| {

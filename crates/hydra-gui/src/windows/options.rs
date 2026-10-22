@@ -360,6 +360,10 @@ fn downloads(app: &App) -> El<'_> {
             tr("Shows or hides the Speed Limiter tab of the progress window."),
         ),
         hinted(
+            check(s.show_progress_bar, tr("Show progress bar in the Status column")).on_toggle(|b| o(OptField::ProgressBar(b))),
+            tr("Fills each download's Status cell up to its percentage, tinted by state."),
+        ),
+        hinted(
             check(s.show_completion_tab, tr("Show \"Options on completion\" tab")).on_toggle(|b| o(OptField::CompletionTab(b))),
             tr("Shows or hides the Options-on-completion tab of the progress window."),
         ),
@@ -645,6 +649,7 @@ impl OptionsState {
             OptField::BgDownload(b) => s.bg_download = b,
             OptField::StartMinimized(b) => s.start_minimized = b,
             OptField::SpeedTab(b) => s.show_speed_tab = b,
+            OptField::ProgressBar(b) => s.show_progress_bar = b,
             OptField::CompletionTab(b) => s.show_completion_tab = b,
             OptField::HideButtons(b) => s.show_hide_buttons = b,
             OptField::ConnDetails(b) => s.show_conn_details = b,
@@ -1932,7 +1937,7 @@ mod tests {
             CapturePluginUrls => capture_plugin_urls,
             ServerDate => server_file_date, NoCatDirs => no_category_dirs,
             ShowFileInfo => show_file_info_dialog, BgDownload => bg_download,
-            StartMinimized => start_minimized, SpeedTab => show_speed_tab,
+            StartMinimized => start_minimized, SpeedTab => show_speed_tab, ProgressBar => show_progress_bar,
             CompletionTab => show_completion_tab, HideButtons => show_hide_buttons,
             ConnDetails => show_conn_details, CompleteDialog => show_complete_dialog,
             RemoveCompleted => remove_completed, AdaptiveConns => adaptive_conns,

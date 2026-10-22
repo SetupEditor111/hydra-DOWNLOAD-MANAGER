@@ -1598,6 +1598,7 @@ pub enum OptField {
     BgDownload(bool),
     StartMinimized(bool),
     SpeedTab(bool),
+    ProgressBar(bool),
     CompletionTab(bool),
     HideButtons(bool),
     ConnDetails(bool),
@@ -2510,6 +2511,7 @@ impl App {
                         ta.cmp(&tb)
                     }
                     Column::Description => a.description.cmp(&b.description),
+                    Column::Downloaded => a.downloaded.cmp(&b.downloaded),
                     Column::Name | Column::Status => std::cmp::Ordering::Equal,
                 };
                 let ord = ord.then_with(|| a.id.cmp(&b.id));

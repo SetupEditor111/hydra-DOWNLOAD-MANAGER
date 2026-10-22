@@ -343,6 +343,15 @@ impl DownloadItem {
         }
     }
 
+    /// The Downloaded column text: bytes received, with the total when known.
+    pub fn downloaded_text(&self) -> String {
+        let got = crate::fmt::size2(self.downloaded);
+        match self.size {
+            Some(s) if s > 0 => format!("{got} / {}", crate::fmt::size2(s)),
+            _ => got,
+        }
+    }
+
     /// The Status column text of the main list, in the active locale.
     pub fn status_text(&self) -> String {
         use crate::i18n::tr;
@@ -849,11 +858,14 @@ pub enum Column {
     Rate,
     LastTry,
     Description,
+    Downloaded,
 }
 
 impl Column {
-    /// Every column, in the order a fresh install shows them.
-    pub const ALL: [Column; 8] = [
+    /// Every column, in the order a fresh install shows them. `Downloaded`
+    /// stays last: a config from before it existed carries one width per
+    /// column in this order (see `migrate_columns`).
+    pub const ALL: [Column; 9] = [
         Column::Name,
         Column::Queue,
         Column::Size,
@@ -862,6 +874,7 @@ impl Column {
         Column::Rate,
         Column::LastTry,
         Column::Description,
+        Column::Downloaded,
     ];
 
     /// The header label, which is also the `tr` key the catalogues carry.
@@ -875,7 +888,13 @@ impl Column {
             Column::Rate => "Transfer Rate",
             Column::LastTry => "Last Try Date",
             Column::Description => "Description",
+            Column::Downloaded => "Downloaded",
         }
+    }
+
+    /// Whether a fresh install, or a config that predates the column, shows it.
+    pub fn shown_by_default(self) -> bool {
+        self != Column::Downloaded
     }
 
     pub fn default_width(self) -> f32 {
@@ -889,6 +908,7 @@ impl Column {
             Column::Rate => 150.0,
             Column::LastTry => 175.0,
             Column::Description => 200.0,
+            Column::Downloaded => 150.0,
         }
     }
 
@@ -904,6 +924,7 @@ impl Column {
             Column::Rate => "Rate",
             Column::LastTry => "LastTry",
             Column::Description => "Description",
+            Column::Downloaded => "Downloaded",
         }
     }
 
@@ -1132,7 +1153,7 @@ impl ColumnPref {
         ColumnPref {
             id,
             width: id.default_width(),
-            visible: true,
+            visible: id.shown_by_default(),
         }
     }
 }
@@ -1276,6 +1297,8 @@ pub struct Settings {
     pub bg_download: bool,
     pub start_minimized: bool,
     pub show_speed_tab: bool,
+    /// Fill each Status cell up to the download's percentage.
+    pub show_progress_bar: bool,
     pub show_completion_tab: bool,
     pub show_hide_buttons: bool,
     /// Whether a progress window opens with the per-connection panel already
@@ -1421,6 +1444,7 @@ impl Default for Settings {
             bg_download: true,
             start_minimized: false,
             show_speed_tab: true,
+            show_progress_bar: true,
             show_completion_tab: true,
             show_hide_buttons: true,
             show_conn_details: true,
@@ -1546,6 +1570,7 @@ impl Settings {
             bg_download,
             start_minimized,
             show_speed_tab,
+            show_progress_bar,
             show_completion_tab,
             show_hide_buttons,
             show_conn_details,
@@ -3267,7 +3292,7 @@ mod tests {
     fn the_outermost_column_has_nowhere_left_to_go() {
         let mut cols = stock();
         assert!(!move_column(&mut cols, Column::Name, true, false));
-        assert!(!move_column(&mut cols, Column::Description, false, false));
+        assert!(!move_column(&mut cols, Column::Downloaded, false, false));
         assert_eq!(order(&cols), order(&stock()));
     }
 
@@ -3304,7 +3329,12 @@ mod tests {
         let mut cols = stock();
         let far: f32 = cols.iter().map(|p| p.width).sum();
         drag_column(&mut cols, Column::Name, 0.0, far);
-        assert_eq!(*order(&cols).last().unwrap(), "Name");
+        let drawn: Vec<_> = cols
+            .iter()
+            .filter(|p| p.visible)
+            .map(|p| p.id.id())
+            .collect();
+        assert_eq!(*drawn.last().unwrap(), "Name");
     }
 
     /// A drag only reorders what the header draws: a hidden column keeps its
@@ -3332,7 +3362,10 @@ mod tests {
         // The Q column's old text-column default is not a width the user
         // chose: it would leave a wide empty band next to File Name.
         assert_eq!(s.columns[1].width, Column::Queue.default_width());
-        assert!(s.columns.iter().all(|p| p.visible));
+        assert!(s
+            .columns
+            .iter()
+            .all(|p| p.visible == p.id.shown_by_default()));
         assert!(
             s.column_widths.is_empty(),
             "the legacy key is folded in and dropped"
@@ -3383,7 +3416,10 @@ mod tests {
         let mut s = Settings::default();
         migrate_columns(&mut s);
         assert_eq!(order(&s.columns), order(&stock()));
-        assert!(s.columns.iter().all(|p| p.visible));
+        assert!(s
+            .columns
+            .iter()
+            .all(|p| p.visible == p.id.shown_by_default()));
     }
 
     /// The reported bug: Options was open while the window was moved and
@@ -3641,5 +3677,37 @@ mod tests {
             test_download(DlState::Receiving, None, 1000).status_text(),
             "Receiving..."
         );
+    }
+
+    #[test]
+    fn downloaded_text_shows_total_only_when_known() {
+        let gb = 1024 * 1024 * 1024;
+        assert_eq!(
+            test_download(DlState::Paused, Some(5 * gb), 2 * gb).downloaded_text(),
+            "2.00 GB / 5.00 GB"
+        );
+        assert_eq!(
+            test_download(DlState::Receiving, None, 512).downloaded_text(),
+            "512 B"
+        );
+    }
+
+    #[test]
+    fn downloaded_column_is_hidden_by_default_and_added_to_old_configs() {
+        assert!(!ColumnPref::new(Column::Downloaded).visible);
+        let mut s = Settings::default();
+        s.columns.retain(|p| p.id != Column::Downloaded);
+        migrate_columns(&mut s);
+        let p = s
+            .columns
+            .iter()
+            .find(|p| p.id == Column::Downloaded)
+            .unwrap();
+        assert!(!p.visible);
+        assert!(s
+            .columns
+            .iter()
+            .filter(|p| p.id != Column::Downloaded)
+            .all(|p| p.visible));
     }
 }
