@@ -7,7 +7,7 @@
 use crate::framebuf;
 use crate::polite::Pace;
 use crate::sink::SparseSink;
-use crate::{Arrival, Connector, Target, READ_BUF};
+use crate::{is_field, Arrival, Connector, Target, READ_BUF};
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -540,12 +540,12 @@ pub(crate) enum Disposition {
 
 fn connection_header(d: Disposition) -> &'static str {
     match d {
-        Disposition::Close => "Connection: close\r\n\r\n",
+        Disposition::Close => "Connection: close\r\n",
         // HTTP/1.1 is keep-alive by default and the header is strictly redundant,
         // but it is sent explicitly: intermediaries and older origins are
         // measurably more consistent when told, and it makes a packet capture
         // state the intent rather than leaving it to be inferred from an absence.
-        Disposition::Reuse => "Connection: keep-alive\r\n\r\n",
+        Disposition::Reuse => "Connection: keep-alive\r\n",
     }
 }
 
@@ -561,6 +561,10 @@ fn build_request_head_disp(
 ) -> String {
     let (target, host_hdr) = t.request_target();
     let mut req = format!("{method} {target} HTTP/1.1\r\nHost: {host_hdr}\r\n");
+    if let Some(chrome) = chrome_profile(t) {
+        push_chrome_request(&mut req, t, &chrome, range, disp);
+        return req;
+    }
     if let Some((first, last)) = range {
         req.push_str(&format!("Range: bytes={first}-{last}\r\n"));
     }
@@ -571,7 +575,139 @@ fn build_request_head_disp(
         req.push_str("\r\n");
     }
     req.push_str(connection_header(disp));
+    req.push_str("\r\n");
     req
+}
+
+/// What a Chrome-family `User-Agent` says about the browser behind it.
+struct ChromeProfile {
+    major: u32,
+    platform: &'static str,
+}
+
+/// A request made under a Chrome `User-Agent` carries that browser's header
+/// set; every other request keeps the plain one.
+///
+/// Akamai Bot Manager (download-center.epson.com) answers `403` to a Chrome
+/// `User-Agent` whose headers are not Chrome's — missing `Accept-Language`,
+/// `Accept-Encoding`, `Sec-Fetch-*`, or in the wrong order — while the same
+/// request in Chrome's shape is served. The profile asks for `identity`
+/// rather than Chrome's `gzip, deflate, br`: the same origin ranges the
+/// compressed representation, whose offsets are not the file's.
+fn chrome_profile(t: &Target) -> Option<ChromeProfile> {
+    let ua = t.agent.as_deref()?;
+    if !ua.starts_with("Mozilla/5.0") {
+        return None;
+    }
+    let major = ua
+        .split_once("Chrome/")?
+        .1
+        .split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()?;
+    let platform = if ua.contains("Windows") {
+        "Windows"
+    } else if ua.contains("Macintosh") {
+        "macOS"
+    } else if ua.contains("Linux") {
+        "Linux"
+    } else {
+        return None;
+    };
+    Some(ChromeProfile { major, platform })
+}
+
+fn push_chrome_request(
+    req: &mut String,
+    t: &Target,
+    chrome: &ChromeProfile,
+    range: Option<(u64, u64)>,
+    disp: Disposition,
+) {
+    let referer = t.extra_headers().find(|h| is_field(h, "referer"));
+    let site = match referer {
+        Some(r) if referer_is_same_origin(r, t) => "same-origin",
+        Some(_) => "cross-site",
+        None => "none",
+    };
+    req.push_str(connection_header(disp));
+    req.push_str(&format!(
+        "sec-ch-ua: \"Chromium\";v=\"{0}\", \"Not?A_Brand\";v=\"8\"\r\n\
+         sec-ch-ua-mobile: ?0\r\n\
+         sec-ch-ua-platform: \"{1}\"\r\n\
+         Upgrade-Insecure-Requests: 1\r\n\
+         User-Agent: {2}\r\n\
+         Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8\r\n\
+         Sec-Fetch-Site: {site}\r\n\
+         Sec-Fetch-Mode: navigate\r\n\
+         Sec-Fetch-User: ?1\r\n\
+         Sec-Fetch-Dest: document\r\n",
+        chrome.major,
+        chrome.platform,
+        t.user_agent(),
+    ));
+    if let Some(r) = referer {
+        req.push_str(r);
+        req.push_str("\r\n");
+    }
+    for (name, line) in [
+        ("accept-encoding", "Accept-Encoding: identity"),
+        ("accept-language", "Accept-Language: en-US,en;q=0.9"),
+    ] {
+        req.push_str(
+            t.extra_headers()
+                .find(|h| is_field(h, name))
+                .unwrap_or(line),
+        );
+        req.push_str("\r\n");
+    }
+    for h in t.extra_headers().filter(|h| {
+        !["referer", "accept-encoding", "accept-language"]
+            .iter()
+            .any(|name| is_field(h, name))
+    }) {
+        req.push_str(h);
+        req.push_str("\r\n");
+    }
+    if let Some((first, last)) = range {
+        req.push_str(&format!("Range: bytes={first}-{last}\r\n"));
+    }
+    req.push_str("\r\n");
+}
+
+fn referer_is_same_origin(referer_line: &str, t: &Target) -> bool {
+    let value = referer_line.split_once(':').map_or("", |(_, v)| v.trim());
+    let Some((_, rest)) = value.split_once("://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let (host, port) = t.origin_endpoint();
+    let default_port = if t.tls { 443 } else { 80 };
+    let want = if port == default_port {
+        host
+    } else {
+        format!("{host}:{port}")
+    };
+    authority.eq_ignore_ascii_case(&want)
+}
+
+/// A response that arrives encoded would be written to disk as the encoded
+/// bytes, so a body with any `Content-Encoding` but `identity` is refused.
+///
+/// The engine decodes none of them, and an origin may encode a reply despite
+/// the profile's `Accept-Encoding: identity`.
+fn reject_content_encoding(head: &str) -> io::Result<()> {
+    match header_value(head, "content-encoding") {
+        Some(enc) if !enc.trim().eq_ignore_ascii_case("identity") => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "server answered with Content-Encoding: {}; the body is not the file's bytes",
+                enc.trim()
+            ),
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// Fetch an object whose length the server will not state, streaming to EOF.
@@ -654,6 +790,7 @@ pub async fn fetch_streaming_observed<C: Connector>(
             "server returned {status} for a streaming fetch"
         )));
     }
+    reject_content_encoding(&h)?;
     let chunked = header_value(&h, "transfer-encoding")
         .map(|v| v.to_ascii_lowercase().contains("chunked"))
         .unwrap_or(false);
@@ -1271,6 +1408,9 @@ pub async fn probe_via_get<C: Connector>(c: &C, t: &Target) -> io::Result<Probe>
         read_error_body(&mut s, &mut head).await;
     }
     let h = String::from_utf8_lossy(&head);
+    if (200..300).contains(&status) {
+        reject_content_encoding(&h)?;
+    }
     let cr = header_value(&h, "content-range");
     let ranges = status == 206 && cr.is_some();
     let size = match cr.as_deref().and_then(parse_content_range_total) {
@@ -1872,6 +2012,9 @@ pub(crate) async fn fetch_range<C: Connector>(
         .and_then(|c| c.parse().ok())
         .unwrap_or(0);
     let content_range = header_value(&head_str, "content-range");
+    if matches!(status, 200 | 206) {
+        reject_content_encoding(&head_str)?;
+    }
     match status {
         206 => {
             let first = content_range
@@ -4316,6 +4459,189 @@ Content-Length: {}\r\nConnection: close\r\n\r\n",
             p.refusal().as_deref(),
             Some(r#"server answered 403 Forbidden ("Request has expired")"#)
         );
+    }
+
+    const CHROME_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
+
+    fn chrome_target(headers: Vec<String>) -> Target {
+        Target::direct_tls("download-center.example.com", 443, "/f/a.exe")
+            .with_headers(headers, Some(CHROME_UA.into()))
+    }
+
+    fn header_names(head: &str) -> Vec<String> {
+        head.split("\r\n")
+            .skip(1)
+            .filter_map(|l| l.split_once(':').map(|(n, _)| n.to_ascii_lowercase()))
+            .collect()
+    }
+
+    #[test]
+    fn a_ranged_request_for_a_chrome_user_carries_chromes_header_set_in_its_order() {
+        let t = chrome_target(vec![
+            "Cookie: a=b".into(),
+            "Referer: https://download-center.example.com/download/?m=1".into(),
+        ]);
+        let head = build_request_head("GET", &t, Some((0, 0)));
+        assert_eq!(
+            header_names(&head),
+            [
+                "host",
+                "connection",
+                "sec-ch-ua",
+                "sec-ch-ua-mobile",
+                "sec-ch-ua-platform",
+                "upgrade-insecure-requests",
+                "user-agent",
+                "accept",
+                "sec-fetch-site",
+                "sec-fetch-mode",
+                "sec-fetch-user",
+                "sec-fetch-dest",
+                "referer",
+                "accept-encoding",
+                "accept-language",
+                "cookie",
+                "range",
+            ],
+            "{head}"
+        );
+        assert!(
+            head.contains("\r\nsec-ch-ua: \"Chromium\";v=\"141\""),
+            "{head}"
+        );
+        assert!(
+            head.contains("\r\nsec-ch-ua-platform: \"Windows\"\r\n"),
+            "{head}"
+        );
+        assert!(
+            head.contains("\r\nSec-Fetch-Site: same-origin\r\n"),
+            "{head}"
+        );
+        assert!(head.contains("\r\nRange: bytes=0-0\r\n\r\n"), "{head}");
+    }
+
+    #[test]
+    fn the_fetch_site_follows_where_the_referer_points() {
+        let site = |referer: Option<&str>| {
+            let t = chrome_target(
+                referer
+                    .map(|r| format!("Referer: {r}"))
+                    .into_iter()
+                    .collect(),
+            );
+            build_request_head("GET", &t, Some((0, 9)))
+        };
+        assert!(site(None).contains("Sec-Fetch-Site: none\r\n"));
+        assert!(
+            site(Some("https://other.example.org/p")).contains("Sec-Fetch-Site: cross-site\r\n")
+        );
+        assert!(site(Some("https://DOWNLOAD-center.example.com/p"))
+            .contains("Sec-Fetch-Site: same-origin\r\n"));
+    }
+
+    #[test]
+    fn a_header_the_user_typed_replaces_the_profile_default() {
+        let t = chrome_target(vec![
+            "Accept-Language: fa-IR".into(),
+            "Accept-Encoding: br".into(),
+        ]);
+        let head = build_request_head("GET", &t, Some((0, 0)));
+        assert_eq!(head.matches("Accept-Language").count(), 1, "{head}");
+        assert!(head.contains("Accept-Language: fa-IR\r\n"), "{head}");
+        assert!(head.contains("Accept-Encoding: br\r\n"), "{head}");
+    }
+
+    #[test]
+    fn requests_outside_the_chrome_profile_keep_the_plain_header_set() {
+        let sends_encoding =
+            |t: &Target, range| build_request_head("GET", t, range).contains("Accept-Encoding");
+        let firefox = Target::direct_tls("h", 443, "/o").with_headers(
+            vec![],
+            Some("Mozilla/5.0 (X11; Linux x86_64; rv:130.0) Gecko/20100101 Firefox/130.0".into()),
+        );
+        assert!(!sends_encoding(&firefox, Some((0, 0))));
+        let hydra = Target::direct_tls("h", 443, "/o");
+        assert!(!sends_encoding(&hydra, Some((0, 0))));
+        let plain = build_request_head("GET", &hydra, Some((0, 0)));
+        assert!(plain.ends_with("Connection: close\r\n\r\n"), "{plain}");
+    }
+
+    #[test]
+    fn the_profile_asks_for_an_unencoded_body_whole_or_ranged() {
+        let t = chrome_target(vec![]);
+        for (method, range) in [("GET", None), ("GET", Some((5, 9))), ("HEAD", None)] {
+            let head = build_request_head(method, &t, range);
+            assert!(head.contains("\r\nAccept-Encoding: identity\r\n"), "{head}");
+            assert_eq!(head.contains("Range:"), range.is_some(), "{head}");
+            assert!(head.ends_with("\r\n\r\n"), "{head}");
+        }
+    }
+
+    #[test]
+    fn an_encoded_body_is_refused_and_an_identity_one_is_not() {
+        assert!(reject_content_encoding("HTTP/1.1 206 Partial Content\r\n\r\n").is_ok());
+        assert!(
+            reject_content_encoding("HTTP/1.1 206 X\r\nContent-Encoding: identity\r\n\r\n").is_ok()
+        );
+        let e = reject_content_encoding("HTTP/1.1 206 X\r\nContent-Encoding: gzip\r\n\r\n")
+            .unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+        assert!(e.to_string().contains("gzip"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn a_ranged_probe_answered_with_gzip_fails_instead_of_sizing_the_compressed_body() {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut r = BufReader::new(sock.try_clone().unwrap());
+                loop {
+                    let mut h = String::new();
+                    if r.read_line(&mut h).unwrap_or(0) == 0 || h == "\r\n" {
+                        break;
+                    }
+                }
+                let _ = sock.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 20\r\n\
+Connection: close\r\n\r\n",
+                );
+            }
+        });
+        let t = Target::direct("127.0.0.1", port, "/o");
+        let err = probe_via_get(&crate::TcpConnector, &t).await.unwrap_err();
+        assert!(err.to_string().contains("Content-Encoding"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_streamed_body_with_a_content_encoding_is_not_written_to_disk() {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut r = BufReader::new(sock.try_clone().unwrap());
+                loop {
+                    let mut h = String::new();
+                    if r.read_line(&mut h).unwrap_or(0) == 0 || h == "\r\n" {
+                        break;
+                    }
+                }
+                let _ = sock.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Encoding: br\r\nContent-Length: 3\r\n\
+Connection: close\r\n\r\nabc",
+                );
+            }
+        });
+        let out = std::env::temp_dir().join(format!("hya-enc-{port}.bin"));
+        let t = Target::direct("127.0.0.1", port, "/o");
+        let err = fetch_streaming(&crate::TcpConnector, &t, out.to_str().unwrap())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("Content-Encoding"), "{err}");
+        assert!(!out.exists(), "nothing was written");
     }
 
     /// A body that already arrived whole must not cost another read: the peer
