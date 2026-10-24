@@ -39,6 +39,7 @@ mod nmhost;
 mod picker;
 mod plugin_link;
 mod plugins;
+mod portable;
 mod proxy;
 #[cfg(test)]
 mod render_check;
@@ -183,7 +184,13 @@ fn prepare_app_dir(dir: PathBuf) -> std::io::Result<PathBuf> {
 fn main() -> iced::Result {
     // `--config DIR` is resolved before anything else: the single-instance
     // probe below already reads ipc.json out of the application directory.
-    match config_dir_arg(std::env::args_os()) {
+    let dir = config_dir_arg(std::env::args_os()).map(|flag| {
+        flag.or_else(|| {
+            let exe = std::env::current_exe().ok()?;
+            portable::data_dir(exe.parent()?)
+        })
+    });
+    match dir {
         Ok(Some(dir)) => match prepare_app_dir(dir) {
             Ok(dir) => model::set_app_dir(dir),
             Err(e) => {

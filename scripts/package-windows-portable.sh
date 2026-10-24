@@ -76,6 +76,10 @@ cp "$BUILD/hydra-gui.exe" "$BUILD/hydra.exe" "$BUILD/hydra-host.exe" \
 cp "$BUILD/hydra.exe" "$APP/hya.exe"
 cp scripts/windows/hydra.ico "$APP/"
 cp LICENSE "$APP/"
+# Marks every start of these binaries as portable, launcher or not. The
+# profile sits in Data\hydra, beside App\ rather than inside it, so a
+# self-update that swaps App\Hydra cannot take the user's downloads with it.
+printf '[Portable]\r\ndata_dir = ..\\..\\Data\\hydra\r\n' > "$APP/Portable.ini"
 cp docs/logo.png "$APP/assets/"
 
 echo "packing browser extensions..."
