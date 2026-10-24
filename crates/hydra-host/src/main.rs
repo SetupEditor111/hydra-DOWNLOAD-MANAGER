@@ -43,6 +43,9 @@ const MACOS_APP_NAME: &str = "Hydra Download Manager";
 /// in hydra-gui. One line: the absolute application directory.
 const PROFILE_POINTER: &str = "hydra-profile";
 
+/// Marker file beside the binaries that makes the whole copy portable.
+const PORTABLE_MARKER: &str = "Portable.ini";
+
 /// The `--config DIR` this host should talk to, if any.
 ///
 /// A native-messaging manifest carries a path and no arguments, so the
@@ -61,6 +64,31 @@ fn portable_dir() -> Option<PathBuf> {
         std::env::var_os("HYDRA_CONFIG"),
         &exe_dir.join(PROFILE_POINTER),
     )
+    .or_else(|| marker_dir(&exe_dir))
+}
+
+/// The profile `Portable.ini` beside the binaries asks for, `None` when
+/// there is no such file. Mirrors `portable::data_dir` in hydra-gui, which
+/// must land on the same directory. Unlike the pointer, the folder need not
+/// exist yet: the marker is next to us, so a first launch from the browser
+/// has to create the profile rather than fall back to the default one.
+fn marker_dir(exe_dir: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(exe_dir.join(PORTABLE_MARKER)).ok()?;
+    let dir = text
+        .trim_start_matches('\u{feff}')
+        .lines()
+        .find_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            let value = value.trim().trim_matches('"');
+            (key.trim().eq_ignore_ascii_case("data_dir") && !value.is_empty())
+                .then(|| PathBuf::from(value))
+        })
+        .unwrap_or_else(|| PathBuf::from("data"));
+    Some(if dir.is_absolute() {
+        dir
+    } else {
+        exe_dir.join(dir)
+    })
 }
 
 /// The profile `HYDRA_CONFIG` or `pointer` names, or None when neither names
@@ -848,6 +876,26 @@ mod tests {
         let env = |v: &str| resolve_profile(Some(v.into()), &pointer);
         assert_eq!(env(&base.to_string_lossy()), Some(base.clone()));
         assert_eq!(env(&base.join("gone").to_string_lossy()), None);
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn portable_ini_names_the_profile_beside_the_binaries() {
+        let base = std::env::temp_dir().join(format!("hydra-marker-{}", std::process::id()));
+        std::fs::create_dir_all(&base).expect("exe dir");
+        assert_eq!(marker_dir(&base), None, "no marker, ordinary install");
+
+        let marker = base.join(PORTABLE_MARKER);
+        std::fs::write(&marker, "").expect("marker");
+        assert_eq!(marker_dir(&base), Some(base.join("data")), "default folder");
+
+        std::fs::write(&marker, "[Portable]\r\nData_Dir = profile\r\n").expect("marker");
+        assert_eq!(marker_dir(&base), Some(base.join("profile")));
+
+        let abs = base.join("elsewhere");
+        std::fs::write(&marker, format!("data_dir=\"{}\"", abs.display())).expect("marker");
+        assert_eq!(marker_dir(&base), Some(abs));
 
         std::fs::remove_dir_all(&base).ok();
     }
