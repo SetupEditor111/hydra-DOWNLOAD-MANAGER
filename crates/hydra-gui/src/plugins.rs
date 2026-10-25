@@ -1786,7 +1786,7 @@ pub(crate) mod tests {
         );
         assert_eq!(app.options.plugins.updates.len(), 1);
         assert!(app.options.plugins.indexes[0].is_default());
-        installed.manifest.version = "0.1.0".into();
+        installed.manifest.version = app.options.plugins.updates[0].version.clone();
         dispatch(&mut app, Message::Loaded(Ok((vec![installed], indexes))));
         assert!(app.options.plugins.updates.is_empty());
     }
