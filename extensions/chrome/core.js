@@ -733,6 +733,40 @@ function captureUrl(item) {
   return deadline <= Date.now() / 1000 + EXPIRY_HORIZON ? item.url : resolved;
 }
 
+// WeTransfer's page downloads through its own service worker, at
+// `/download/local-bartender?id=<base64 JSON>`. That URL exists only inside the
+// browser that registered the worker; anywhere else it is a 404. The `id` holds
+// what the worker would send to the API, so we ask for the real link instead.
+async function resolveLocalBartender(url) {
+  let page;
+  try {
+    page = new URL(url);
+  } catch {
+    return url;
+  }
+  if (!/(^|\.)wetransfer\.com$/i.test(page.hostname) || page.pathname !== "/download/local-bartender") {
+    return url;
+  }
+  try {
+    const job = JSON.parse(atob(page.searchParams.get("id")));
+    const body = { security_hash: job.secret, intent: job.intent };
+    if (job.password) body.password = job.password;
+    if (job.recipientId) body.recipient_id = job.recipientId;
+    if (job.fileIds) body.file_ids = String(job.fileIds).split(",");
+    const reply = await fetch(`${page.origin}/api/v4/transfers/${encodeURIComponent(job.transferId)}/download`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      credentials: "include",
+    });
+    if (!reply.ok) return url;
+    const { direct_link: link } = await reply.json();
+    return /^https:/i.test(link) ? link : url;
+  } catch {
+    return url;
+  }
+}
+
 async function sendToHydra(url, extras = {}) {
   return request({
     type: "download",
@@ -763,7 +797,7 @@ async function offerToHydra({ url, filename, mime, size, referer }) {
       `capture list (Options > Downloaded file types)`
     );
   }
-  const reply = await sendToHydra(url, {
+  const reply = await sendToHydra(await resolveLocalBartender(url), {
     filename: filename ? String(filename).split(/[/\\]/).pop() : null,
     referer: referer || null,
     size: size > 0 ? size : null,

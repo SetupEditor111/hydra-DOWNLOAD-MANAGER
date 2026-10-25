@@ -18,7 +18,7 @@ const check = (label, cond, extra = "") => {
 };
 const tick = (n = 3) => new Promise((r) => { let i = 0; const f = () => (++i >= n ? r() : setImmediate(f)); setImmediate(f); });
 
-function build({ hydraReply = { ok: true }, store = {}, gecko = false, tab = null, proxy, proxyStyle = "callback", cookieJar = null, frames = null } = {}) {
+function build({ hydraReply = { ok: true }, store = {}, gecko = false, tab = null, proxy, proxyStyle = "callback", cookieJar = null, frames = null, fetchImpl = null } = {}) {
   const sent = [];          // messages that reached "Hydra"
   const calls = [];         // downloads API calls
   const cookieQueries = []; // every cookies.getAll details object
@@ -139,10 +139,10 @@ function build({ hydraReply = { ok: true }, store = {}, gecko = false, tab = nul
 
   const ctx = vm.createContext({
     chrome, navigator: { userAgent: UA }, WebSocket: FakeWS, console,
-    setTimeout, clearTimeout, setInterval, clearInterval, setImmediate, fetch: async () => { throw new Error("no net"); },
+    setTimeout, clearTimeout, setInterval, clearInterval, setImmediate, fetch: fetchImpl ?? (async () => { throw new Error("no net"); }),
     // A fresh vm context has the ECMAScript built-ins only; URL and friends
     // are web globals the service worker relies on, so hand them in.
-    AbortController, URL, URLSearchParams, TextDecoder,
+    AbortController, URL, URLSearchParams, TextDecoder, atob,
   });
   loadBackground(ctx, gecko ? "firefox" : "chrome");
   const send = (msg) => new Promise((res) => { listeners.msg.l[0](msg, {}, res); });
@@ -261,6 +261,53 @@ function build({ hydraReply = { ok: true }, store = {}, gecko = false, tab = nul
   check("alt stand-in: a non-http link is refused", refused?.ok === false);
   check("alt stand-in: and never reaches the downloads API",
     h.calls.filter(([c]) => c === "download").length === 1, JSON.stringify(h.calls));
+}
+
+// ------------------------- 3c. WeTransfer's service-worker download URL
+//
+// The page downloads through `/download/local-bartender`, a URL only its own
+// service worker answers. Replayed by Hydra it is a 404, so the real link is
+// asked of the API with the job the URL carries.
+{
+  const job = { transferId: "t1", secret: "h4sh", intent: "entire_transfer" };
+  const virtual = `https://team.wetransfer.com/download/local-bartender?id=${encodeURIComponent(btoa(JSON.stringify(job)))}`;
+  const fetched = [];
+  const answer = (status, json) => async (url, init) => {
+    fetched.push({ url, init });
+    return { ok: status === 200, status, json: async () => json };
+  };
+  const capture = async (opts) => {
+    const h = build(opts);
+    await tick(4);
+    const item = { id: 9, url: virtual, filename: "a.zip", mime: "application/zip", referrer: "https://team.wetransfer.com/" };
+    h.onCreated.fire(item); await tick(3);
+    h.onDetermining.fire(item, () => {}); await tick(10);
+    return h;
+  };
+
+  let h = await capture({ fetchImpl: answer(200, { direct_link: "https://download.wetransfer.com/eu/t1/a.zip?token=x" }) });
+  const dl = h.sent.find((m) => m.type === "download");
+  check("wetransfer: Hydra gets the API's direct link", dl?.url === "https://download.wetransfer.com/eu/t1/a.zip?token=x", JSON.stringify(dl));
+  check("wetransfer: the API is asked for that transfer with its security hash",
+    fetched[0]?.url === "https://team.wetransfer.com/api/v4/transfers/t1/download" &&
+      JSON.parse(fetched[0]?.init.body).security_hash === "h4sh" &&
+      JSON.parse(fetched[0]?.init.body).intent === "entire_transfer", JSON.stringify(fetched));
+
+  h = await capture({ fetchImpl: answer(404, {}) });
+  check("wetransfer: a refused API call falls back to the captured URL",
+    h.sent.find((m) => m.type === "download")?.url === virtual);
+
+  h = await capture({ fetchImpl: answer(200, { direct_link: "http://evil.example/a.zip" }) });
+  check("wetransfer: a non-https direct link is not trusted",
+    h.sent.find((m) => m.type === "download")?.url === virtual);
+
+  fetched.length = 0;
+  h = build({ fetchImpl: answer(200, { direct_link: "https://x.example/" }) });
+  await tick(4);
+  const plain = { id: 10, url: "https://cdn.example/pack.zip", filename: "pack.zip", mime: "application/zip" };
+  h.onCreated.fire(plain); await tick(3);
+  h.onDetermining.fire(plain, () => {}); await tick(10);
+  check("wetransfer: other downloads never touch the API", fetched.length === 0, JSON.stringify(fetched));
 }
 
 // ------------------------------------------------------- 4. excluded site
