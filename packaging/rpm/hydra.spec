@@ -27,7 +27,7 @@ Source1:        https://github.com/ja7ad/hydra/releases/download/v%{version}/hyd
 # Both ship /usr/bin/hydra.
 Conflicts:      hydra
 
-Recommends:     gnome-shell-extension-appindicator
+Suggests:       gnome-shell-extension-appindicator
 
 BuildRequires:  cargo
 BuildRequires:  rust >= 1.75
