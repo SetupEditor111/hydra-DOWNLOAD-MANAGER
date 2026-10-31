@@ -826,10 +826,11 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # install-action has no cbindgen build and falls back to cargo-binstall,
+      # whose upgrade step fails on the macOS runner image. Pinned so a newer
+      # cbindgen cannot change the generated header under the --check below.
       - name: Install cbindgen
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cbindgen
+        run: cargo install cbindgen --version 0.29.4 --locked
 
       # include/hydra.h is generated from the Rust definitions and committed.
       # Every archive below ships the committed copy, so if it has drifted, the
