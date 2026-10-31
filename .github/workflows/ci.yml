@@ -170,10 +170,11 @@ jobs:
       - name: Set up Rust cache
         uses: Swatinem/rust-cache@v2
 
+      # install-action has no cbindgen build and falls back to cargo-binstall,
+      # whose upgrade step fails on the macOS runner image. Pinned so a newer
+      # cbindgen cannot change the generated header under the --check below.
       - name: Install cbindgen
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cbindgen
+        run: cargo install cbindgen --version 0.29.4 --locked
 
       # The committed header is a published ABI artifact. If it no longer
       # matches the Rust definitions it was generated from, third parties are
